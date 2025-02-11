@@ -196,11 +196,6 @@ async def startup_event():
         raise
 
 
-# Get API key from environment variables
-GOOGLE_API_KEY = os.getenv('GOOGLE_API_KEY')
-if not GOOGLE_API_KEY:
-    raise ValueError("GOOGLE_API_KEY environment variable is not set")
-
 @app.post("/speech-to-text")
 async def speech_to_text(audio: UploadFile = File(...)):
     try:
@@ -212,62 +207,26 @@ async def speech_to_text(audio: UploadFile = File(...)):
             temp_audio.write(audio_content)
             temp_audio_path = temp_audio.name
 
-        # Convert audio to WAV format if needed
+        # Convert audio to WAV format
         audio = AudioSegment.from_file(temp_audio_path)
         audio.export(temp_audio_path, format="wav")
-        
-        # Read the processed audio file and encode it to base64
-        with open(temp_audio_path, "rb") as audio_file:
-            content = base64.b64encode(audio_file.read()).decode("utf-8")
 
-        # Prepare the request to Google Cloud Speech-to-Text API
-        url = "https://speech.googleapis.com/v1/speech:recognize"
+        # Initialize recognizer
+        recognizer = sr.Recognizer()
         
-        headers = {
-            "Authorization": f"Bearer {GOOGLE_API_KEY}",
-            "Content-Type": "application/json; charset=utf-8"
-        }
+        # Perform recognition
+        with sr.AudioFile(temp_audio_path) as source:
+            audio_data = recognizer.record(source)
+            text = recognizer.recognize_google(audio_data)
         
-        data = {
-            "config": {
-                "encoding": "LINEAR16",
-                "sampleRateHertz": audio.frame_rate,
-                "languageCode": "en-US",
-                "enableAutomaticPunctuation": True
-            },
-            "audio": {
-                "content": content
-            }
-        }
-
-        # Make the request to Google Cloud
-        response = requests.post(
-            f"{url}?key={GOOGLE_API_KEY}",
-            headers=headers,
-            json=data
-        )
-
-        # Clean up temporary file
+        # Clean up
         os.unlink(temp_audio_path)
-
-        if response.status_code != 200:
-            raise HTTPException(
-                status_code=response.status_code,
-                detail=f"Google Cloud API error: {response.text}"
-            )
-
-        result = response.json()
         
-        # Extract the transcribed text
-        if "results" in result and len(result["results"]) > 0:
-            transcribed_text = result["results"][0]["alternatives"][0]["transcript"]
-            return {"text": transcribed_text}
-        else:
-            return {"text": ""}
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        return {"text": text}
     
+    except Exception as e:
+        return {"error": str(e)}
+
 @app.post("/start-quiz/{user_id}")
 async def start_quiz(user_id: str):
     if not quiz_storage.qa_chain:
