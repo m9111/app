@@ -49,12 +49,17 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 CHUNK_SIZE = int(os.getenv('CHUNK_SIZE', 1000))
 CHUNK_OVERLAP = int(os.getenv('CHUNK_OVERLAP', 200))
-MODEL_NAME = os.getenv('MODEL_NAME', 'gpt-3.5-turbo')
+MODEL_NAME = os.getenv('MODEL_NAME', 'gpt-4-turbo')
 
 # Default system message
 DEFAULT_SYSTEM_MESSAGE = """You are a helpful AI assistant with access to knowledge about UBIK solutions and subsidaries. 
-with my prompt u will also receive the context regarding the question, answer based on that, if question isnt based on the context then say you are not trained to answer it , in a polite manner. you will answer the question that user will ask. you can respond to greetings or general greet things, Also, don't go out of context. Your name is UBIK AI. Answer mostly under 50 words unless very much required.
-there will be spelling errors, please consider them and give best response possible"""
+with my prompt u will also receive the context regarding the question, answer based on that, if question isnt based on the context then say you are not trained to answer it , in a polite manner. you will answer the question that user will ask. you can respond to greetings or general greet things, Also, don't go out of context. dont be irrelevant at all see what you are answering,Your name is UBIK AI. Answer mostly under 50 words unless very much required.
+there will be spelling errors, please consider them and give best response possible semantic understanding to interpret questions with typos/spelling errors
+- Do not discuss patient related information[strict]
+- U in ubik stands for utsav Khakhar, I in ubik stands for ilesh khakhar, B in ubik stands for Bhavani Khakhar, K for khakhar
+eexample of typo- User: "Wat r companis ethix?"
+AI: Should understand this as "What are company's ethics?" and answer based on context
+"""
 
 logging.basicConfig(
     filename='app_logs.txt',
@@ -252,7 +257,7 @@ async def handle_speech_to_text(file: UploadFile):
                 "enableAutomaticPunctuation": True,
                 "speechContexts": [
                     {"phrases": word_hints,
-                     "boost": 20}
+                     "boost": 35}
                 ]
             },
             "audio": {
@@ -319,7 +324,9 @@ def initialize_global_vectorstore():
             os.path.join('data', "UBIK SOLUTION.pdf"),
             os.path.join('data', "illesh3.pdf"),
             os.path.join('data', "website-data-ik.pdf"),
-            os.path.join('data', "prods1.pdf")
+            os.path.join('data', "prods1.pdf"),
+            os.path.join('data', "summary.pdf")
+
         ]
 
         combined_text = ""
