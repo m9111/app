@@ -356,46 +356,12 @@ def handle_userinput(user_question: str, user_id: str):
     if not conversation_chain:
         return None
 
-    # Step 1: Define the refinement template
-    def refine_input(input_text):
-        refinement_prompt = f"""
-        Based on the following user input: "{input_text}"
-        
-        
-        1. If it's a basic greeting:
-            - Respond: "Hello! How can I help you with information about UBIK Solutions?"
-        
-        2. For questions:
-            - Process them directly using available context
-            - Keep responses focused and concise
-        
-        Maintain a professional tone and avoid unnecessary elaboration.
-        
-        Refined query:
-        """
-        return conversation_chain({'question': refinement_prompt})['answer'].strip()
+    # Get answer directly without refinement
+    answer = conversation_chain({'question': user_question})['answer'].strip()
 
-    # Step 2: Generate the answer using the refined input
-    def generate_answer(refined_input):
-        answer_prompt = f"""
-        User's Refined Input: "{refined_input}"
-
-        Context: Respond to the user's query based on the refined input in a clear, concise, and contextually relevant manner.
-
-        Answer:
-        """
-        return conversation_chain({'question': answer_prompt})['answer'].strip()
-
-    # Step 3: Refine the user input
-    refined_question = refine_input(user_question)
-    log_event("RefinedInput", f"Refined Question: {refined_question}", user_id=user_id)
-
-    # Step 4: Generate the final answer
-    answer = generate_answer(refined_question)
-
-    # Step 5: Log events and update history
+    # Log events and update history
     user_state['history'].append((user_question, answer))
-    log_event("PromptSentToGPT", f"Original Prompt: {user_question}, Refined: {refined_question}", user_id=user_id)
+    log_event("PromptSentToGPT", f"Original Prompt: {user_question}", user_id=user_id)
     log_event("UserQuestion", f"Q: {user_question}", user_id=user_id)
     log_event("AIAnswer", f"A: {answer}", user_id=user_id)
 
