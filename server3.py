@@ -55,7 +55,7 @@ MODEL_NAME = os.getenv('MODEL_NAME', 'gpt-4-turbo')
 DEFAULT_SYSTEM_MESSAGE = """You are a helpful AI assistant with access to knowledge about UBIK solutions and subsidaries. 
 with my prompt u will also receive the context regarding the question, answer based on that, if question isnt based on the context then say you are not trained to answer it , in a polite manner. you will answer the question that user will ask. you can respond to greetings or general greet things, Also, don't go out of context. dont be irrelevant at all see what you are answering,Your name is UBIK AI. Answer mostly under 50 words unless very much required.
 there will be spelling errors, please consider them and give best response possible semantic understanding to interpret questions with typos/spelling errors
-- Do not discuss patient related information[strict]
+- Do not discuss patient related information[strict], dont yap be relevant to question aksed, you are here to provided asistance regarding ubik and subsidaries.
 - U in ubik stands for utsav Khakhar, I in ubik stands for ilesh khakhar, B in ubik stands for Bhavani Khakhar, K for khakhar
 eexample of typo- User: "Wat r companis ethix?"
 AI: Should understand this as "What are company's ethics?" and answer based on context
@@ -356,46 +356,12 @@ def handle_userinput(user_question: str, user_id: str):
     if not conversation_chain:
         return None
 
-    # Step 1: Define the refinement template
-    def refine_input(input_text):
-        refinement_prompt = f"""
-        Based on the following user input: "{input_text}"
-        
-        
-        1. If it's a basic greeting:
-            - Respond: "Hello! How can I help you with information about UBIK Solutions?"
-        
-        2. For questions:
-            - Process them directly using available context
-            - Keep responses focused and concise
-        
-        Maintain a professional tone and avoid unnecessary elaboration.
-        
-        Refined query:
-        """
-        return conversation_chain({'question': refinement_prompt})['answer'].strip()
+    # Get answer directly without refinement
+    answer = conversation_chain({'question': user_question})['answer'].strip()
 
-    # Step 2: Generate the answer using the refined input
-    def generate_answer(refined_input):
-        answer_prompt = f"""
-        User's Refined Input: "{refined_input}"
-
-        Context: Respond to the user's query based on the refined input in a clear, concise, and contextually relevant manner.
-
-        Answer:
-        """
-        return conversation_chain({'question': answer_prompt})['answer'].strip()
-
-    # Step 3: Refine the user input
-    refined_question = refine_input(user_question)
-    log_event("RefinedInput", f"Refined Question: {refined_question}", user_id=user_id)
-
-    # Step 4: Generate the final answer
-    answer = generate_answer(refined_question)
-
-    # Step 5: Log events and update history
+    # Log events and update history
     user_state['history'].append((user_question, answer))
-    log_event("PromptSentToGPT", f"Original Prompt: {user_question}, Refined: {refined_question}", user_id=user_id)
+    log_event("PromptSentToGPT", f"Original Prompt: {user_question}", user_id=user_id)
     log_event("UserQuestion", f"Q: {user_question}", user_id=user_id)
     log_event("AIAnswer", f"A: {answer}", user_id=user_id)
 
@@ -408,7 +374,7 @@ def create_or_refresh_user_chain(user_id: str):
             return False, "Global vectorstore is not initialized."
 
         # Create chat model with system message
-        chat_llm = ChatOpenAI(model=MODEL_NAME, temperature=0.9)
+        chat_llm = ChatOpenAI(model=MODEL_NAME, temperature=0.7)
 
         # Create custom QA prompt template that includes system message
         condense_template = """Given the following conversation and a follow up question, rephrase the follow up question to be a standalone question, in its original language.

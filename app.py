@@ -6,7 +6,10 @@ from typing import List, Dict, Optional
 import os
 import os
 import os
-
+from langchain_openai import ChatOpenAI
+from langchain.chains import LLMChain
+from langchain.prompts import PromptTemplate
+from langchain.chains import RetrievalQA
 import uuid
 import time
 import logging
@@ -101,44 +104,38 @@ class QuizResult(BaseModel):
     improvement_areas: List[str]
 
 def generate_unique_questions() -> List[str]:
-    """Generate unique dermatology questions based on the content."""
-    prompt = """Generate 5 unique and challenging dermatology questions from test deep understanding of clinical concepts. 
+    """Generate unique dermatology questions with improved performance."""
+    question_template = """
+    Based on the following context, generate 5 unique and challenging dermatology questions.
     Questions should:
-    - Focus on different aspects of dermatology (diagnosis, treatment, pathology, etc.)
-    - generate questions from docs-content-only
-    - Test application of knowledge rather than mere recall
-    - Cover diverse skin conditions and treatments
+    - Focus on different aspects of dermatology (diagnosis, treatment, pathology)
+    - Test application of knowledge rather than recall
     - Be clinically relevant and practice-oriented
     
-    Format: Return only a JSON array of 5 question strings.
-    Example question style: "Explain the pathophysiology of psoriasis and how this relates to the mechanism of action of biological treatments."
+    Context: {context}
+    
+    Return only a JSON array of 5 question strings.
     """
     
     try:
-        # Get relevant document context
-        relevant_docs = quiz_storage.vector_store.similarity_search(prompt, k=5)
-        doc_context = "\n\n".join([d.page_content for d in relevant_docs])
-
-        # Generate questions using both prompt and document context
-        full_prompt = f"Document Context:\n{doc_context}\n\nTask: {prompt}"
-        response = quiz_storage.qa_chain.run(full_prompt)
-
-        # Clean and parse response
+        # Get relevant context once
+        relevant_docs = quiz_storage.vector_store.similarity_search(
+            "dermatology concepts treatment diagnosis pathology",
+            k=5 # Reduced number of documents
+        )
+        context = "\n\n".join([d.page_content for d in relevant_docs])
+        
+        # Generate questions using the dedicated chain
+        response = quiz_storage.question_chain.run(context=context)
+        
+        # Parse and validate response
         response = response.replace("'", '"').strip()
         if '[' in response and ']' in response:
             response = response[response.find('['):response.rfind(']')+1]
         questions = json.loads(response)
-
-        # Validate questions against documents
-        validated_questions = []
-        for question in questions[:5]:
-            # Verify question is answerable from documents
-            supporting_docs = quiz_storage.vector_store.similarity_search(question, k=1)
-            if supporting_docs:
-                validated_questions.append(question)
         
-        return validated_questions[:5]
-
+        return questions[:5]
+        
     except Exception as e:
         raise HTTPException(
             status_code=500,
@@ -158,43 +155,70 @@ logger = logging.getLogger(__name__)
 async def startup_event():
     pdf_dir = "datamn"
     try:
+        # Load documents with larger chunks
         documents = []
         for pdf_file in os.listdir(pdf_dir):
             if pdf_file.endswith('.pdf'):
                 loader = PyPDFLoader(os.path.join(pdf_dir, pdf_file))
                 documents.extend(loader.load())
         
-        # Split documents with smaller chunks for better question generation
+        # Optimize text splitting
         text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=800,
-            chunk_overlap=200,
+            chunk_size=2000,  # Increased chunk size
+            chunk_overlap=100,  # Reduced overlap
             separators=["\n\n", "\n", " ", ""]
         )
         splits = text_splitter.split_documents(documents)
         
-        # Create vector store with stronger embeddings
+        # Initialize embeddings and vector store
         embeddings = OpenAIEmbeddings(
             openai_api_key=OPENAI_API_KEY,
-            model="text-embedding-3-large"
+            model="text-embedding-ada-002"
         )
         quiz_storage.vector_store = FAISS.from_documents(splits, embeddings)
         
-        # Create QA chain with document focus
+        # Initialize LLM with optimized settings
         llm = ChatOpenAI(
-            temperature=0.3,
+            temperature=0.7,
             model_name="gpt-3.5-turbo",
             openai_api_key=OPENAI_API_KEY
         )
+        
+        # Create optimized QA chain
         quiz_storage.qa_chain = RetrievalQA.from_chain_type(
             llm=llm,
-            chain_type="map_reduce",
-            retriever=quiz_storage.vector_store.as_retriever(search_kwargs={"k": 3}),
-            chain_type_kwargs={"verbose": True}
+            chain_type="stuff",  # Changed to simpler chain type
+            retriever=quiz_storage.vector_store.as_retriever(
+                search_kwargs={"k":5} # Reduced number of documents
+            ),
+            verbose=False  # Disabled verbose logging
         )
+        
+        # Initialize dedicated question generation chain
+        question_prompt = PromptTemplate(
+            template="""
+            Based on the following context, generate 5 unique and challenging dermatology questions.
+            Questions should:
+            - Focus on different aspects of dermatology (diagnosis, treatment, pathology)
+            - Test application of knowledge rather than recall
+            - Be clinically relevant and practice-oriented
+            
+            Context: {context}
+            
+            Return only a JSON array of 5 question strings.
+            """,
+            input_variables=["context"]
+        )
+        
+        quiz_storage.question_chain = LLMChain(
+            llm=llm,
+            prompt=question_prompt,
+            verbose=False
+        )
+        
     except Exception as e:
         print(f"Initialization error: {str(e)}")
         raise
-
 
 @app.post("/speech-to-text")
 async def speech_to_text(audio: UploadFile = File(...)):
@@ -232,7 +256,6 @@ async def start_quiz(user_id: str):
     if not quiz_storage.qa_chain:
         raise HTTPException(status_code=500, detail="Quiz system not properly initialized")
     
-    # Generate unique questions for this session
     questions = generate_unique_questions()
     
     quiz_storage.user_sessions[user_id] = {
@@ -244,89 +267,32 @@ async def start_quiz(user_id: str):
     }
     
     return get_next_question(user_id)
+
 @app.post("/speech-to-text")
-async def handle_speech_to_text(file: UploadFile):
-    logger.info(f"Starting speech to text conversion for file: {file.filename}")
-    
-    if file is None:
-        logger.error("No file provided")
-        return JSONResponse(
-            status_code=400,
-            content={"error": "No file provided."}
-        )
-
-    # Create data directory if it doesn't exist
-    os.makedirs("data", exist_ok=True)
-    
-    # Generate temporary file paths
-    webm_path = os.path.join("data", f"temp_{uuid.uuid4().hex}.webm")
-    wav_path = os.path.join("data", f"temp_{uuid.uuid4().hex}.wav")
-    
+async def speech_to_text(audio: UploadFile = File(...)):
     try:
-        # Save the uploaded file
-        logger.debug("Reading uploaded file")
-        content = await file.read()
-        with open(webm_path, "wb") as f:
-            f.write(content)
-        logger.debug(f"Saved WebM file to {webm_path}")
+        audio_content = await audio.read()
         
-        # Convert to WAV format
-        logger.debug("Converting WebM to WAV")
-        try:
-            subprocess.run([
-                'ffmpeg', '-i', webm_path, 
-                '-acodec', 'pcm_s16le', 
-                '-ar', '16000', 
-                '-ac', '1', 
-                wav_path
-            ], check=True, capture_output=True, text=True)
-        except subprocess.CalledProcessError as e:
-            logger.error(f"FFmpeg conversion failed: {str(e)}")
-            return JSONResponse(
-                status_code=500,
-                content={"error": f"Audio conversion failed: {e.stderr}"}
-            )
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.wav') as temp_audio:
+            temp_audio.write(audio_content)
+            temp_audio_path = temp_audio.name
 
-        # Initialize speech recognizer
-        r = sr.Recognizer()
+        audio = AudioSegment.from_file(temp_audio_path)
+        audio.export(temp_audio_path, format="wav")
+
+        recognizer = sr.Recognizer()
         
-        # Process the audio file
-        with sr.AudioFile(wav_path) as source:
-            audio = r.record(source)  # Read the entire audio file
-            logger.debug("Processing audio with Google Speech Recognition...")
-            
-            try:
-                text = r.recognize_google(audio)
-                logger.info("Successfully transcribed audio")
-                return {"status": "success", "text": text}
-                
-            except sr.UnknownValueError:
-                logger.error("Google Speech Recognition could not understand audio")
-                return JSONResponse(
-                    status_code=400,
-                    content={"error": "Could not understand audio"}
-                )
-            except sr.RequestError as e:
-                logger.error(f"Could not request results from Google SR service; {e}")
-                return JSONResponse(
-                    status_code=503,
-                    content={"error": f"Speech service error: {str(e)}"}
-                )
-
-    except Exception as e:
-        logger.exception("Unexpected error occurred")
-        return JSONResponse(
-            status_code=500,
-            content={"error": f"An error occurred during transcription: {str(e)}"}
-        )
+        with sr.AudioFile(temp_audio_path) as source:
+            audio_data = recognizer.record(source)
+            text = recognizer.recognize_google(audio_data)
+        
+        os.unlink(temp_audio_path)
+        
+        return {"text": text}
     
-    finally:
-        # Clean up temporary files
-        logger.debug("Cleaning up temporary files")
-        for path in [webm_path, wav_path]:
-            if os.path.exists(path):
-                os.remove(path)
-                logger.debug(f"Removed {path}")
+    except Exception as e:
+        return {"error": str(e)}
+
 
 
 @app.post("/answer-question/{user_id}")
@@ -341,16 +307,11 @@ async def answer_question(user_id: str, response: QuizResponse):
     
     current_question = session["questions"][session["current_question"]]
     
-    # Handle skipped questions
+    # Handle skipped questions with optimized processing
     if response.answer == "SKIPPED":
-        ideal_answer_prompt = f"""
-        Based on the content, provide a detailed ideal answer for this question:
-        Question: {current_question}
-        
-        Format your response as a clear, concise explanation that could serve as a model answer.
-        """
-        
-        ideal_answer = quiz_storage.qa_chain.run(ideal_answer_prompt)
+        ideal_answer = quiz_storage.qa_chain.run(
+            f"Provide a concise ideal answer for: {current_question}"
+        )
         
         session["answers"].append("SKIPPED")
         session["scores"].append(0)
@@ -362,29 +323,60 @@ async def answer_question(user_id: str, response: QuizResponse):
         })
         session["current_question"] += 1
         
-        if session["current_question"] >= 5:
-            return calculate_results(user_id)
-        else:
-            return get_next_question(user_id)
+        return get_next_question(user_id) if session["current_question"] < 5 else calculate_results(user_id)
     
-    # Evaluate non-skipped answers
-    evaluation_prompt = f"""
-    Evaluate this answer to the following question:
-    Question: {current_question}
-    Answer: {response.answer}
-    
-    Provide:
-    1. A score from 0 to 1 based on accuracy and completeness
-    2. Specific feedback on the answer
-    3. One key area for improvement
-    
-    Format: Return a JSON object with keys 'score', 'feedback', and 'improvement'
-    """
-    
+    # Evaluate non-skipped answers with structured prompt
     try:
-        eval_response = quiz_storage.qa_chain.run(evaluation_prompt)
-        eval_data = json.loads(eval_response)
+        eval_prompt = f"""
+        You are an expert dermatology evaluator. Evaluate this answer carefully:
         
+        Question: {current_question}
+        Student Answer: {response.answer}
+        
+        Provide your evaluation in the following JSON format exactly:
+        {{
+            "score": <number between 0 and 1>,
+            "feedback": "<specific feedback on the answer>",
+            "improvement": "<one key area for improvement>"
+        }}
+        
+        Ensure the response is valid JSON with these exact keys.
+        """
+        
+        # Get raw response from QA chain
+        eval_response = quiz_storage.qa_chain.run(eval_prompt)
+        
+        # Clean the response to ensure valid JSON
+        eval_response = eval_response.strip()
+        if eval_response.startswith('```json'):
+            eval_response = eval_response[7:-3]  # Remove ```json and ``` if present
+        elif eval_response.startswith('```'):
+            eval_response = eval_response[3:-3]  # Remove ``` if present
+            
+        # Parse JSON with error handling
+        try:
+            eval_data = json.loads(eval_response)
+            
+            # Validate required keys
+            required_keys = {'score', 'feedback', 'improvement'}
+            if not all(key in eval_data for key in required_keys):
+                raise ValueError("Missing required keys in evaluation response")
+                
+            # Validate score is a number between 0 and 1
+            score = float(eval_data['score'])
+            if not 0 <= score <= 1:
+                score = max(0, min(1, score))  # Clamp between 0 and 1
+                
+        except json.JSONDecodeError as json_err:
+            # Fallback evaluation if JSON parsing fails
+            eval_data = {
+                'score': 0.5,  # Default middle score
+                'feedback': "Unable to parse evaluation properly. Please review with instructor.",
+                'improvement': "System error in evaluation - please try again"
+            }
+            logging.error(f"JSON parsing error: {json_err}\nRaw response: {eval_response}")
+        
+        # Update session with evaluation results
         session["answers"].append(response.answer)
         session["scores"].append(float(eval_data["score"]))
         session["feedback"].append({
@@ -394,12 +386,14 @@ async def answer_question(user_id: str, response: QuizResponse):
         })
         session["current_question"] += 1
         
+        # Return next question or final results
         if session["current_question"] >= 5:
             return calculate_results(user_id)
         else:
             return get_next_question(user_id)
             
     except Exception as e:
+        logging.error(f"Error in answer evaluation: {str(e)}\nUser ID: {user_id}\nResponse: {response}")
         raise HTTPException(
             status_code=500,
             detail=f"Error evaluating answer: {str(e)}"
@@ -408,20 +402,14 @@ async def answer_question(user_id: str, response: QuizResponse):
 @app.post("/process-voice")
 async def process_voice(voice_input: VoiceInput):
     try:
-        # Decode base64 audio data
         audio_bytes = base64.b64decode(voice_input.audio_data)
         audio_file = io.BytesIO(audio_bytes)
         
-        # Initialize recognizer
         recognizer = sr.Recognizer()
         
         with sr.AudioFile(audio_file) as source:
             audio = recognizer.record(source)
-            
-            # Attempt to recognize speech
             text = recognizer.recognize_google(audio)
-            print(text)
-            
             return {"success": True, "text": text}
             
     except Exception as e:
@@ -436,6 +424,7 @@ def get_next_question(user_id: str) -> Dict:
         "question_number": session["current_question"] + 1,
         "question_text": session["questions"][session["current_question"]]
     }
+
 
 def calculate_results(user_id: str) -> QuizResult:
     session = quiz_storage.user_sessions[user_id]
